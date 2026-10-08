@@ -57,3 +57,7 @@ claude plugin test <path-to-this-folder>
 ```
 
 To run a working copy instead of the installed version, start Claude Code with `claude --plugin-dir <path-to-this-folder>`.
+
+## License
+
+[MIT](../../LICENSE) © 2026 Vienna BioCenter

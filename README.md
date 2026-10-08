@@ -10,8 +10,6 @@ Claude Code mods for the VBC: displays and extensions for the terminal and the d
 
 ## Install
 
-This repository is private: you need read access to `vienna-bio-center/claude-vbc-mods` and working git credentials for GitHub on your machine (for example via `gh auth login`).
-
 In a Claude Code terminal session, install any mod from this repository with:
 
 ```
@@ -42,3 +40,7 @@ Answer `y` to add the marketplace (only asked the first time), then pick the **u
    ```
 
 Bump `version` in the mod's `plugin.json` with every change you publish.
+
+## License
+
+[MIT](LICENSE) © 2026 Vienna BioCenter
