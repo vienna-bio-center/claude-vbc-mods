@@ -1,0 +1,6 @@
+# Written by Claude Code on every load of a mod; regenerated, never edited
+**/.claude-plugin/types/
+mods/*/tsconfig.json
+
+# macOS
+.DS_Store

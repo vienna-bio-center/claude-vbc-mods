@@ -1,0 +1,13 @@
+{
+  "name": "vbc-mods",
+  "description": "Claude Code mods for the VBC: displays and extensions for the terminal and the desktop app",
+  "owner": {
+    "name": "Ronny Zimmermann"
+  },
+  "plugins": [
+    {
+      "name": "context-meter",
+      "source": "./mods/context-meter"
+    }
+  ]
+}
