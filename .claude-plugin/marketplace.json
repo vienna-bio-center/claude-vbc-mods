@@ -8,6 +8,10 @@
     {
       "name": "context-meter",
       "source": "./mods/context-meter"
+    },
+    {
+      "name": "delete-guard",
+      "source": "./mods/delete-guard"
     }
   ]
 }
