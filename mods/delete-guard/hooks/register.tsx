@@ -19,7 +19,7 @@ type $ = EngineInterface
 type Answer = 'allow' | 'cancel'
 
 const PANE = 'delete-guard'
-const TITLE = 'Confirm delete'
+const TITLE = 'Delete Guard'
 const queue = atom({ plugin: 'delete-guard', key: 'queue' } as const, [])
 
 /** Entries listed per command, folder entries counted per folder, paths shown inside a folder. */
@@ -117,11 +117,11 @@ export const resolve = async ($: $, found: Found[], cwd: string, home: string) =
   const notes: string[] = []
   const seen = new Set<string>()
   let skipped = 0
-  const add = async (abs: string, isDeep: boolean) => {
+  const add = async (abs: string, isDeep: boolean, change?: string) => {
     if (seen.has(abs)) return
     seen.add(abs)
     if (entries.length >= MAX_ENTRIES) skipped++
-    else entries.push(await describe($, abs, cwd, home, isDeep))
+    else entries.push({ ...(await describe($, abs, cwd, home, isDeep)), ...(change === undefined ? {} : { change }) })
   }
   const dirOf = (f: { cwd: string[]; isCwdKnown: boolean }) =>
     f.isCwdKnown ? f.cwd.reduce((d, seg) => joinPath(d, seg === '~' || seg.startsWith('~/') ? home + seg.slice(1) : seg), cwd) : null
@@ -133,19 +133,21 @@ export const resolve = async ($: $, found: Found[], cwd: string, home: string) =
     }
     const dir = dirOf(f)
     if (f.kind === 'paths') {
+      const change = f.change === undefined ? {} : { change: f.change }
       for (const word of f.words) {
         const isRelative = !word.text.startsWith('/') && !word.pattern.startsWith('~')
         if (word.isDynamic || (dir === null && isRelative)) {
           entries.push({
             ...blank(word.text),
+            ...change,
             kind: 'unknown',
             note: word.isDynamic ? 'decided only when the command runs' : 'folder unknown: the command changes folder first',
           })
           continue
         }
         const paths = await expand($, word.pattern, dir ?? cwd, home)
-        if (paths === null) entries.push({ ...blank(word.text), note: 'matches nothing' })
-        else for (const p of paths) await add(p, true)
+        if (paths === null) entries.push({ ...blank(word.text), ...change, note: 'matches nothing' })
+        else for (const p of paths) await add(p, f.change === undefined, f.change)
       }
       continue
     }
@@ -190,6 +192,10 @@ export const summary = (entries: Entry[]) => {
   return parts.length > 0 ? parts.join(', ') : 'nothing that exists right now'
 }
 
+/** What Claude wants to do: `truncate` when every path is only cut, `delete` otherwise. */
+export const headline = (entries: Entry[]) =>
+  `${entries.length > 0 && entries.every(e => e.change !== undefined) ? 'truncate' : 'delete'} ${summary(entries)}`
+
 type Line = { text: string; color?: string; isDim?: boolean; isBold?: boolean }
 
 /** The panel's list, folders first; each folder with its size and a few paths inside. */
@@ -213,7 +219,10 @@ export const lines = (req: Request): Line[] => {
     ]
   })
   group('Files', ['file', 'link'], f => [
-    { text: `  • ${f.path}  ${f.kind === 'link' ? '(link)' : bytes(f.size)}`, color: 'error' },
+    {
+      text: `  • ${f.path}  ${f.kind === 'link' ? '(link)' : bytes(f.size)}${f.change === undefined ? '' : `  → ${f.change}`}`,
+      color: 'error',
+    },
   ])
   group('Known only when it runs', ['unknown'], u => [{ text: `  ? ${u.path}  ${u.note}`, color: 'warning' }])
   group('Not there (nothing to delete)', ['missing'], m => [{ text: `  ${m.path}  ${m.note}`, isDim: true }])
@@ -265,7 +274,7 @@ const hold = async ($: $, decided: Promise<Answer>, signal: AbortSignal): Promis
 /** The engine's own question, for when the panel can't be shown or held open. */
 const askInstead = async ($: $, req: Request, decided: Promise<Answer>): Promise<Answer> => {
   const asked = $.ui
-    .ask(`Claude wants to delete ${summary(req.entries)}. Allow it?`, {
+    .ask(`Claude wants to ${headline(req.entries)}. Allow it?`, {
       options: ['Cancel', 'Allow delete'],
       header: 'Delete',
     })
@@ -325,7 +334,7 @@ export const register: Register = on => {
     const opened = await $.ui
       .open({ id: PANE, title: TITLE, focus: true })
       .catch(() => ({ isPlaced: false as const, reason: 'the panel could not be opened' }))
-    if (opened.isPlaced) $.ui.toast(`Claude wants to delete ${summary(entries)}: confirm or cancel in the "${TITLE}" panel`)
+    if (opened.isPlaced) $.ui.toast(`Claude wants to ${headline(entries)}: confirm or cancel in the "${TITLE}" panel`)
 
     let answer: Answer
     try {
@@ -381,7 +390,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text bold color="error">
-          Claude wants to delete {summary(req.entries)}
+          Claude wants to {headline(req.entries)}
         </Text>
         {list.length > 1 && <Text color="warning">1 of {list.length} waiting</Text>}
         <Text dimColor wrap="truncate-middle">

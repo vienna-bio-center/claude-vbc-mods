@@ -5,7 +5,7 @@
 export type Word = { text: string; pattern: string; isDynamic: boolean }
 
 export type Found =
-  | { kind: 'paths'; tool: string; cwd: string[]; isCwdKnown: boolean; words: Word[] }
+  | { kind: 'paths'; tool: string; cwd: string[]; isCwdKnown: boolean; words: Word[]; change?: string }
   | { kind: 'find'; cwd: string[]; isCwdKnown: boolean; argv: string[] | null; text: string }
   | { kind: 'git-clean'; cwd: string[]; isCwdKnown: boolean; argv: string[] | null; text: string }
   | { kind: 'opaque'; text: string; why: string }
@@ -296,6 +296,49 @@ const readGit = (args: Word[], ctx: Ctx): Found | null => {
   return { kind: 'git-clean', cwd, isCwdKnown, argv: ['git', ...globals, 'clean', '-n', ...flags], text }
 }
 
+/**
+ * `truncate` keeps the file but cuts its content: what it does to each file, as
+ * `change`. Only growing it (`+N`, `>N`, `%N`) loses nothing and is left alone.
+ */
+const readTruncate = (args: Word[], ctx: Ctx): Found | null => {
+  let size: string | undefined
+  let ref: string | undefined
+  const words: Word[] = []
+  let isFlagsDone = false
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i]!
+    const t = w.text
+    if (isFlagsDone || !isFlag(w)) words.push(w)
+    else if (t === '--') isFlagsDone = true
+    else if (t === '--size' || t === '--reference' || /^-[a-z]*[sr]$/.test(t)) {
+      const value = args[++i]?.text ?? ''
+      if (t === '--size' || t.endsWith('s')) size = value
+      else ref = value
+    } else if (t.startsWith('--size=')) size = t.slice(7)
+    else if (t.startsWith('--reference=')) ref = t.slice(12)
+    else {
+      const glued = /^-[a-z]*?([sr])(.+)$/.exec(t)
+      if (glued?.[1] === 's') size = glued[2]
+      else if (glued?.[1] === 'r') ref = glued[2]
+    }
+  }
+  if (words.length === 0 || (size === undefined && ref === undefined)) return null
+  if (size !== undefined && /^[+>%]/.test(size)) return null
+  const change =
+    size === undefined
+      ? `size set to that of ${ref}`
+      : /^0+$/.test(size)
+        ? 'emptied, the file stays'
+        : size.startsWith('-')
+          ? `shortened by ${size.slice(1)}`
+          : size.startsWith('<')
+            ? `cut to at most ${size.slice(1)}`
+            : size.startsWith('/')
+              ? `cut to a multiple of ${size.slice(1)}`
+              : `size set to ${size}`
+  return { kind: 'paths', tool: 'truncate', cwd: [...ctx.cwd], isCwdKnown: ctx.isCwdKnown, words, change }
+}
+
 type Ctx = { cwd: string[]; isCwdKnown: boolean; found: Found[]; others: number; depth: number }
 
 /** One simple command: what it deletes goes to `ctx.found`, a `cd` moves `ctx.cwd`. */
@@ -329,6 +372,12 @@ const readCommand = (raw: Word[], ctx: Ctx) => {
   if (name === 'gio' && (args[0]?.text === 'trash' || args[0]?.text === 'remove')) {
     const words = operands(args.slice(1))
     if (words.length > 0) ctx.found.push({ kind: 'paths', tool: `gio ${args[0]!.text}`, cwd: [...ctx.cwd], isCwdKnown: ctx.isCwdKnown, words })
+    return
+  }
+  if (name === 'truncate') {
+    const found = readTruncate(args, ctx)
+    if (found !== null) ctx.found.push(found)
+    else ctx.others++
     return
   }
   if (name === 'find') {

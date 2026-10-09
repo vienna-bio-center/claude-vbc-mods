@@ -2,13 +2,13 @@ import type { FsEntry, On, RenderSurface } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Request } from '../types'
-import { fit, lines, summary } from './register'
+import { fit, headline, lines, summary } from './register'
 
 const PANE = {
   component: 'Pane',
   requestId: 'delete-guard',
   props: {
-    title: 'Confirm delete',
+    title: 'Delete Guard',
     isFocused: true,
     bodyColumns: 80,
     placement: 'dock',
@@ -87,6 +87,13 @@ describe('panel text', () => {
     expect(text.at(-1)).toBe('  gone  does not exist')
   })
 
+  test('a truncated file says what happens to it, and the headline says truncate', async () => {
+    const cut = { ...REQ.entries[1]!, change: 'emptied, the file stays' }
+    expect(lines({ ...REQ, entries: [cut] }).map(l => l.text)).toContain('  • notes.txt  2 KB  → emptied, the file stays')
+    expect(headline([cut])).toBe('truncate 1 file')
+    expect(headline([cut, REQ.entries[0]!])).toBe('delete 1 folder (2 files inside), 1 file')
+  })
+
   test('fit keeps to the room and says how much it left out', async () => {
     const all = lines(REQ)
     expect(fit(all, 100)).toEqual(all)
@@ -123,6 +130,20 @@ describe('asking before a delete', () => {
       await pane.unmount()
     })
   }
+
+  test('truncate opens the panel too', async ($, on) => {
+    const { ran, clock } = host(on)
+    const call = $.tool.call({ tool: 'Bash', command: 'truncate -s 0 notes.txt' })
+    await clock.settle()
+    expect(ran).toEqual([])
+    const pane = await $.ui.mount({ plugin: 'delete-guard', surface: 'terminal', ...PANE })
+    expect(await pane.find({ type: 'Text', text: /Claude wants to truncate 1 file/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /notes\.txt\s+2 KB\s+→ emptied/ })).toBeDefined()
+    await pane.press({ key: 'allow' })
+    expect((await call).deny).toBeUndefined()
+    expect(ran).toEqual(['truncate -s 0 notes.txt'])
+    await pane.unmount()
+  })
 
   test('Cancel refuses the delete and nothing runs', async ($, on) => {
     const { ran, clock } = host(on)

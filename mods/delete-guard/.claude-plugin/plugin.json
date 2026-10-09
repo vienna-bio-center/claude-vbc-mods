@@ -1,6 +1,6 @@
 {
   "name": "delete-guard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Stops Claude before it deletes files: a side panel lists every folder and file that would go, with Cancel and Allow buttons",
   "author": {
     "name": "Ronny Zimmermann"

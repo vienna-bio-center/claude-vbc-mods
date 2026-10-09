@@ -13,6 +13,8 @@ export type Entry = {
   sample: string[]
   /** Why it is listed this way (`matches nothing`, `decided when the command runs`). */
   note: string
+  /** Set when the command cuts the file instead of removing it (`truncate`): what it does to it. */
+  change?: string
 }
 
 /** A delete waiting for the person's answer. */

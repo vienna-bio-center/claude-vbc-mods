@@ -78,6 +78,19 @@ describe('finding deletes', () => {
     expect(targets('git rm -r old/')).toEqual(['git rm:old/'])
   })
 
+  test('truncate is caught unless it only grows the file', async () => {
+    const change = (command: string) => findDeletes(command).found.map(f => f.kind === 'paths' && `${f.words.map(w => w.text).join(',')}: ${f.change}`)
+    expect(change('truncate -s 0 app.log')).toEqual(['app.log: emptied, the file stays'])
+    expect(change('truncate --size=10K a b')).toEqual(['a,b: size set to 10K'])
+    expect(change('truncate -cs-1M big.bin')).toEqual(['big.bin: shortened by 1M'])
+    expect(change('truncate -r ref.txt out.txt')).toEqual(['out.txt: size set to that of ref.txt'])
+    expect(change('sudo truncate -s0 -- -x')).toEqual(['-x: emptied, the file stays'])
+    expect(targets('truncate -s +1M disk.img')).toEqual([])
+    expect(targets('truncate -s %4K disk.img')).toEqual([])
+    expect(targets('truncate --help')).toEqual([])
+    expect(findDeletes('truncate -s 0 a.log').isOnlyDeletes).toBe(true)
+  })
+
   test('xargs rm and rsync --delete are named but cannot be listed', async () => {
     expect(targets('find . -name x | xargs rm -f')).toEqual(['opaque'])
     expect(targets('rsync -a --delete src/ dst/')).toEqual(['opaque'])

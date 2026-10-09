@@ -51,6 +51,7 @@ If the panel is closed while a delete waits, `/delete-guard` opens it again.
 | Command | What the panel lists |
 |---|---|
 | `rm`, `rmdir`, `unlink`, `shred`, `trash`, `gio trash`, `rimraf` | the named paths, with wildcards (`*.log`), `{a,b}` and `~` expanded; for a folder its size, file count and the first few entries |
+| `truncate` (not when it only grows a file: `-s +N`) | the named files, each with what happens to it (`→ emptied, the file stays`); the panel then says *truncate* instead of *delete* |
 | `git rm` (not `--cached`) | the named paths |
 | `git clean` | exactly what `git clean -n` (dry run) reports |
 | `find … -delete`, `find … -exec rm …` | the matches of the same `find` without the delete |
