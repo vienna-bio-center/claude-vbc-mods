@@ -204,6 +204,10 @@ describe('asking before a delete', () => {
     const call = $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
     await clock.settle()
     const pane = await $.ui.mount({ plugin: 'delete-guard', surface: 'terminal', ...PANE })
+    // the panel opens with its name in red, above the rest
+    const drawn = await pane.drawn()
+    expect(JSON.stringify(drawn).indexOf('"color":"error"},"children":["Delete Guard"]')).toBeGreaterThan(-1)
+    expect(JSON.stringify(drawn).indexOf('Delete Guard')).toBeLessThan(JSON.stringify(drawn).indexOf('Claude wants to'))
     await pane.press({ key: 'cancel' })
 
     const result = await call

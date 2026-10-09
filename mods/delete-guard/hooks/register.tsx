@@ -388,7 +388,7 @@ const askInstead = async ($: $, req: Request, decided: Promise<Answer>): Promise
   const asked = $.ui
     .ask(question(req), {
       options: ['Cancel', 'Allow'],
-      header: 'Delete',
+      header: 'Delete Guard',
     })
     .then(
       (a): Answer => (a === 'Allow' ? 'allow' : 'cancel'),
@@ -505,9 +505,14 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text bold color="error">
-          Claude wants to {headline(req.entries, req.notes)}
-        </Text>
+        <Box flexDirection="column">
+          <Text bold color="error">
+            {TITLE}
+          </Text>
+          <Text bold color="error">
+            Claude wants to {headline(req.entries, req.notes)}
+          </Text>
+        </Box>
         {list.length > 1 && <Text color="warning">1 of {list.length} waiting</Text>}
         <Text dimColor wrap="truncate-middle">
           in {tilde(req.cwd, home)}

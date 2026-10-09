@@ -6,6 +6,7 @@
 A Claude Code mod that stops Claude before it deletes files, or overwrites or empties files that hold something. A side panel lists every folder and file the command would remove or change, with **Cancel** and **Allow** buttons underneath. Nothing happens until you press one of them.
 
 ```
+Delete Guard
 Claude wants to delete 1 folder (2 files inside), 1 file
 in ~/projects/analysis
 $ rm -rf junk keep.txt nothere.log
