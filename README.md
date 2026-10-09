@@ -7,6 +7,7 @@ Claude Code mods for the VBC: displays and extensions for the terminal and the d
 | Mod | What it does |
 |---|---|
 | [context-meter](mods/context-meter/) | Context window and usage limits, always visible above the prompt |
+| [delete-guard](mods/delete-guard/) | Stops Claude before it deletes files: a side panel lists what would go, with Cancel and Allow buttons |
 
 ## Install
 
