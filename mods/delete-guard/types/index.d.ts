@@ -13,7 +13,9 @@ export type Entry = {
   sample: string[]
   /** Why it is listed this way (`matches nothing`, `decided when the command runs`). */
   note: string
-  /** Set when the command cuts the file instead of removing it (`truncate`): what it does to it. */
+  /** What the command does to it when that is not a plain delete. */
+  action?: 'truncate' | 'overwrite' | 'discard'
+  /** Said beside it: `emptied, the file stays`, `overwritten by cp`. */
   change?: string
 }
 

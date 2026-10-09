@@ -4,7 +4,10 @@ import { bytes, expandBraces, findDeletes, joinPath, lex, segmentRegex, showPath
 import type { Found } from './parse'
 
 const targets = (command: string) =>
-  findDeletes(command).found.map(f => (f.kind === 'paths' ? `${f.tool}:${f.words.map(w => w.text).join(',')}` : f.kind))
+  findDeletes(command).found.map(f =>
+    f.kind === 'paths' ? `${f.tool}:${f.words.map(w => w.text).join(',')}` : f.kind === 'overwrite' ? `${f.tool}>${f.dest.text}` : f.kind,
+  )
+const only = (command: string) => findDeletes(command).isOnlyDeletes
 
 describe('finding deletes', () => {
   test('plain rm, rmdir, unlink, shred', async () => {
@@ -57,23 +60,37 @@ describe('finding deletes', () => {
     expect((findDeletes('cd "$DIR" && rm z').found[0] as { isCwdKnown: boolean }).isCwdKnown).toBe(false)
   })
 
-  test('redirections are not targets', async () => {
-    expect(targets('rm a 2>/dev/null')).toEqual(['rm:a'])
-    expect(targets('rm b >log.txt 2>&1')).toEqual(['rm:b'])
+  test('a redirect that empties a file is an overwrite; appending and 2>&1 are not', async () => {
+    expect(targets('rm a 2>/dev/null')).toEqual(['>>/dev/null', 'rm:a'])
+    expect(targets('rm b >log.txt 2>&1')).toEqual(['>>log.txt', 'rm:b'])
+    expect(targets('echo x >> log.txt')).toEqual([])
+    expect(targets(': > a.log; cat /dev/null >| b.log; make &> c.log; make >& d.log')).toEqual(['>>a.log', '>>b.log', '>>c.log', '>>d.log'])
+    expect(targets('cat <<EOF\nhi\nEOF')).toEqual([])
   })
 
   test('find with -delete or -exec rm gets a dry run', async () => {
     const [f] = findDeletes(`find . -name '*.pyc' -delete`).found
-    expect(f).toEqual({ kind: 'find', cwd: [], isCwdKnown: true, argv: ['find', '.', '(', '-name', '*.pyc', ')', '-print'], text: 'find . -name *.pyc -delete' })
+    expect(f).toEqual({ kind: 'find', cwd: [], isCwdKnown: true, argv: ['find', '.', '-depth', '-name', '*.pyc', '-print'], text: 'find . -name *.pyc -delete' })
     const [g] = findDeletes('find src -type f -exec rm {} +').found
-    expect(g?.kind === 'find' && g.argv).toEqual(['find', 'src', '(', '-type', 'f', ')', '-print'])
+    expect(g?.kind === 'find' && g.argv).toEqual(['find', 'src', '-type', 'f', '-print'])
     const [h] = findDeletes('find . -exec rm {} \\; -exec touch x \\;').found
     expect(h?.kind === 'find' && h.argv).toBe(null)
   })
 
+  test('find keeps the order of its tests: a delete is swapped for -print in place', async () => {
+    const [f] = findDeletes(`find . -type f -delete -name '*.tmp'`).found
+    expect(f?.kind === 'find' && f.argv).toEqual(['find', '.', '-depth', '-type', 'f', '-print', '-name', '*.tmp'])
+  })
+
+  test('find -exec: wrappers count, extra paths are listed too', async () => {
+    expect(targets('find . -exec sudo rm {} +')).toEqual(['find'])
+    expect(targets('find . -name cache -exec rm -rf /important {} +')).toEqual(['find', 'rm:/important'])
+    expect(targets('find . -name x -exec cp {} backup/ \\;')).toEqual([])
+  })
+
   test('git clean gets a dry run, git rm lists its paths', async () => {
     const [f] = findDeletes('git -C repo clean -fdx').found
-    expect(f?.kind === 'git-clean' && f.argv).toEqual(['git', 'clean', '-n', '-dx'])
+    expect(f?.kind === 'git-clean' && f.argv).toEqual(['git', '-c', 'core.fsmonitor=false', '--no-optional-locks', 'clean', '-n', '-d', '-x', '--'])
     expect(f?.kind === 'git-clean' && f.cwd).toEqual(['repo'])
     expect(targets('git rm -r old/')).toEqual(['git rm:old/'])
   })
@@ -89,6 +106,158 @@ describe('finding deletes', () => {
     expect(targets('truncate -s %4K disk.img')).toEqual([])
     expect(targets('truncate --help')).toEqual([])
     expect(findDeletes('truncate -s 0 a.log').isOnlyDeletes).toBe(true)
+  })
+
+  test("a dry run never takes the command's own git config or global flags", async () => {
+    const [f] = findDeletes(`git -c 'core.fsmonitor=touch MARK' --exec-path=/x clean -fd --interactive -e keep.txt`).found
+    expect(f?.kind === 'git-clean' && f.argv).toEqual(['git', '-c', 'core.fsmonitor=false', '--no-optional-locks', 'clean', '-n', '-d', '--exclude=keep.txt', '--'])
+    const [g] = findDeletes('GIT_DIR=/x git clean -fd').found
+    expect(g?.kind === 'git-clean' && g.argv).toBe(null)
+    const [h] = findDeletes('git --git-dir=elsewhere --work-tree=. clean -fd').found
+    expect(h?.kind === 'git-clean' && h.argv).toBe(null)
+  })
+
+  test('a value is not a flag: `-e -n` excludes "-n", it is no dry run', async () => {
+    expect(targets('git clean -fd -e -n')).toEqual(['git-clean'])
+    expect(targets('git clean -fd --exclude -n')).toEqual(['git-clean'])
+    expect(targets('git clean -fd -en')).toEqual(['git-clean'])
+    expect(targets('git clean -fd --dry')).toEqual([])
+    expect(targets('git rm --cach a')).toEqual([])
+  })
+
+  test('only a pure delete lets the panel answer for Claude Code too', async () => {
+    expect(only('find . -exec rm {} \\; -exec touch marker \\;')).toBe(false)
+    expect(only('rm build; command curl -v https://example.com')).toBe(false)
+    expect(only('cp a b && rm a')).toBe(false)
+    expect(only('git restore x.txt')).toBe(false)
+    expect(only('find . -name x -delete')).toBe(true)
+    expect(only('git rm -r old')).toBe(true)
+  })
+
+  test('wrappers, shells and runners that used to slip through', async () => {
+    expect(targets('command rm -v victim')).toEqual(['rm:victim'])
+    expect(targets('command -v rm')).toEqual([])
+    expect(targets('sudo --user root rm victim')).toEqual(['rm:victim'])
+    expect(targets('sudo --user=root rm victim')).toEqual(['rm:victim'])
+    expect(targets(`env -S 'rm -rf build'`)).toEqual(['rm:build'])
+    expect(targets(`bash -cf 'rm victim'`)).toEqual(['rm:victim'])
+    expect(targets(`bash -c -- 'rm victim'`)).toEqual(['rm:victim'])
+    expect(targets(`bash -o pipefail -c 'rm victim'`)).toEqual(['rm:victim'])
+    expect(targets('npx rimraf build')).toEqual(['rimraf:build'])
+    expect(targets('npx -y rimraf build')).toEqual(['rimraf:build'])
+    expect(targets('npm exec -- rimraf build')).toEqual(['rimraf:build'])
+    expect(targets('pnpm dlx rimraf build')).toEqual(['rimraf:build'])
+    expect(targets(`npx -c 'rm x'`)).toEqual(['rm:x'])
+  })
+
+  test('env -C and sudo -D move only that one command', async () => {
+    const found = findDeletes('env -C /other rm victim; sudo -D /srv rm y; rm z').found as Extract<Found, { kind: 'paths' }>[]
+    expect(found.map(f => f.cwd)).toEqual([['/other'], ['/srv'], []])
+  })
+
+  test('git rm, rsync and the trash in their other spellings', async () => {
+    expect(targets('xargs git rm')).toEqual(['opaque'])
+    expect(targets('git rm --pathspec-from-file=paths.txt')).toEqual(['opaque'])
+    expect(targets('git rm -- --cached')).toEqual(['git rm:--cached'])
+    expect(targets('rsync -a --del src/ dst/')).toEqual(['opaque'])
+    expect(targets('rsync -a --delete-after src/ dst/')).toEqual(['opaque'])
+    expect(targets('gio trash --empty')).toEqual(['opaque'])
+    expect(targets('trash-empty')).toEqual(['opaque'])
+  })
+
+  test('cp, mv, install, tee and dd name what they write to', async () => {
+    const found = (command: string) =>
+      findDeletes(command).found.map(f => f.kind === 'overwrite' && `${f.tool} ${f.sources.map(w => w.text).join(',')} -> ${f.dest.text} ${f.intoDir}`)
+    expect(found('cp a.txt b.txt')).toEqual(['cp a.txt -> b.txt null'])
+    expect(found('cp -r a b dir')).toEqual(['cp a,b -> dir true'])
+    expect(found('mv -t dir a')).toEqual(['mv a -> dir true'])
+    expect(found('cp -T a b')).toEqual(['cp a -> b false'])
+    expect(found('install -m 644 a /usr/local/bin/a')).toEqual(['install a -> /usr/local/bin/a null'])
+    expect(found('cp -n a b')).toEqual([])
+    expect(found('mv -i a b')).toEqual([])
+    expect(found('cp --backup=numbered a b')).toEqual([])
+    expect(found('install -d dir')).toEqual([])
+    expect(targets('tee out.txt')).toEqual(['tee>out.txt'])
+    expect(targets('tee -a out.txt')).toEqual([])
+    expect(targets('dd if=a of=b.img')).toEqual(['dd>b.img'])
+    expect(targets('dd if=a of=/dev/disk2')).toEqual(['opaque'])
+    expect(targets('dd if=a of=/dev/null')).toEqual(['dd>/dev/null'])
+  })
+
+  test('git commands that throw away uncommitted changes', async () => {
+    const discard = (command: string) =>
+      findDeletes(command).found.map(f => f.kind === 'git-discard' && `${f.scope} ${f.argv?.slice(f.argv.indexOf('--') + 1).join(',')}${f.note ? ' !' : ''}`)
+    expect(discard('git reset --hard')).toEqual(['all '])
+    expect(discard('git reset --hard origin/main')).toEqual(['all  !'])
+    expect(discard('git reset --soft HEAD~1')).toEqual([])
+    expect(discard('git restore a.txt')).toEqual(['worktree a.txt'])
+    expect(discard('git restore --staged a.txt')).toEqual([])
+    expect(discard('git restore -SW a.txt')).toEqual(['all a.txt'])
+    expect(discard('git checkout -- a.txt')).toEqual(['worktree a.txt'])
+    expect(discard('git checkout main -- a.txt')).toEqual(['all a.txt'])
+    expect(discard('git checkout .')).toEqual(['worktree .'])
+    expect(discard('git checkout -f main')).toEqual(['all '])
+    expect(discard('git checkout src/app.ts')).toEqual(['worktree src/app.ts'])
+    expect(discard('git checkout main src/')).toEqual(['all main,src/'])
+    expect(discard('git checkout -b feature')).toEqual([])
+    expect(discard('git switch --discard-changes main')).toEqual(['all '])
+    const [f] = findDeletes(`git -c core.fsmonitor=evil restore x`).found
+    expect(f?.kind === 'git-discard' && f.argv?.slice(0, 4)).toEqual(['git', '-c', 'core.fsmonitor=false', '--no-optional-locks'])
+  })
+
+  test('only a plain command can be answered for Claude Code: no PATH tricks, local programs, runners or git config', async () => {
+    for (const command of [
+      'PATH=./bin rm x',
+      'LD_PRELOAD=./x.so rm a',
+      'env PATH=/evil rm x',
+      './rm -rf build',
+      './timeout 1 rm x',
+      './git clean -fd',
+      "git -c core.fsmonitor='touch /tmp/pwn' clean -fdx",
+      'GIT_CONFIG_PARAMETERS=x git rm a',
+      'npx -p evil-pkg rimraf dist',
+      'pnpm dlx rimraf dist',
+      `bash --rcfile ./r -ic 'rm x'`,
+      `bash -lc 'rm x'`,
+      'rm ${X:-$(id)}',
+      'rm $(( $(id) ))',
+    ])
+      expect([command, only(command)]).toEqual([command, false])
+    expect(targets('./rm -rf build')).toEqual(['rm:build'])
+    expect(only('/bin/rm x')).toBe(true)
+    expect(only('git -C repo rm a')).toBe(true)
+    expect(only(`bash -ec 'rm x'`)).toBe(true)
+    expect(only('rm ${X}/a')).toBe(true)
+  })
+
+  test('a here-doc body is text: quotes and > in it hide nothing and ask about nothing', async () => {
+    expect(targets("cat <<EOF\nit's\nEOF\nrm -rf src")).toEqual(['rm:src'])
+    expect(targets("cat > s.sh <<'EOF'\necho hi > README.md\nEOF")).toEqual(['>>s.sh'])
+    expect(targets('cat <<EOF\n$(rm -rf x)\nEOF')).toEqual(['rm:x'])
+    expect(targets("cat <<-'X'\n\trm y\n\tX\nrm z")).toEqual(['rm:z'])
+  })
+
+  test('grouped and glued wrapper flags, xargs options', async () => {
+    expect(targets('sudo -nu root rm -rf /x')).toEqual(['rm:/x'])
+    expect(targets("env -S'rm -rf /important'")).toEqual(['rm:/important'])
+    expect(targets('xargs --max-procs 4 rm -rf')).toEqual(['opaque'])
+    expect(targets('xargs -J % rm -rf %')).toEqual(['opaque', 'rm:%'])
+    const [f] = findDeletes('env -Cbuild rm -rf dist').found
+    expect(f?.kind === 'paths' && f.cwd).toEqual(['build'])
+  })
+
+  test("find's own -print does not widen the preview", async () => {
+    const [f] = findDeletes(`find . -print -name '*.log' -delete`).found
+    expect(f?.kind === 'find' && f.argv).toEqual(['find', '.', '-depth', '-true', '-name', '*.log', '-print'])
+  })
+
+  test('ln -f, git stash drop/clear and git worktree remove --force', async () => {
+    expect(targets('ln -sf other existing.txt')).toEqual(['ln>existing.txt'])
+    expect(targets('ln -s other new.txt')).toEqual([])
+    expect(targets('git stash drop')).toEqual(['opaque'])
+    expect(targets('git stash clear')).toEqual(['opaque'])
+    expect(targets('git stash')).toEqual([])
+    expect(targets('git worktree remove --force ../wt')).toEqual(['opaque'])
   })
 
   test('xargs rm and rsync --delete are named but cannot be listed', async () => {
@@ -107,6 +276,15 @@ describe('finding deletes', () => {
 })
 
 describe('paths', () => {
+  test('brace ranges keep zero padding and stop at a limit', async () => {
+    expect(expandBraces('f{01..03}')).toEqual(['f01', 'f02', 'f03'])
+    expect(expandBraces('f{1..1002}')).toBe(null)
+    expect(expandBraces('{1..40}{1..40}')).toBe(null)
+    expect(expandBraces('file{1..9..2}')).toEqual(['file1', 'file3', 'file5', 'file7', 'file9'])
+    expect(expandBraces('f{a..c}')).toEqual(['fa', 'fb', 'fc'])
+    expect(expandBraces('f{a..3}')).toEqual(['f{a..3}'])
+  })
+
   test('braces expand like bash', async () => {
     expect(expandBraces('a.{txt,log}')).toEqual(['a.txt', 'a.log'])
     expect(expandBraces('f{1..3}')).toEqual(['f1', 'f2', 'f3'])
@@ -143,6 +321,6 @@ describe('paths', () => {
 
   test('lex keeps operators apart from words', async () => {
     const { tokens } = lex('a&&b|c;d')
-    expect(tokens.map(t => (t.type === 'op' ? t.op : t.word.text))).toEqual(['a', '&&', 'b', '|', 'c', ';', 'd'])
+    expect(tokens.map(t => (t.type === 'op' ? t.op : t.type === 'redirect' ? `>${t.mode}` : t.word.text))).toEqual(['a', '&&', 'b', '|', 'c', ';', 'd'])
   })
 })

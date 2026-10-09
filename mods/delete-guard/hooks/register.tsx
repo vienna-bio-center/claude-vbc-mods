@@ -81,10 +81,12 @@ const describe = async ($: $, abs: string, cwd: string, home: string, isDeep: bo
   return { ...entry, kind: 'file', size: stat.size }
 }
 
-/** The paths a shell word names: `~`, braces and globs expanded as bash would. */
-const expand = async ($: $, pattern: string, base: string, home: string): Promise<string[] | null> => {
+/** The paths a shell word names: `~`, braces and globs expanded as bash would; `null` for none, `too-many` past the limit. */
+const expand = async ($: $, pattern: string, base: string, home: string): Promise<string[] | null | 'too-many'> => {
   const out: string[] = []
-  for (let p of expandBraces(pattern)) {
+  const names = expandBraces(pattern)
+  if (names === null) return 'too-many'
+  for (let p of names) {
     if (p === '~' || p.startsWith('~/')) p = home.replace(/[\\*?[\]{}~]/g, '\\$&') + p.slice(1)
     if (!hasGlob(p)) {
       out.push(joinPath(base, unescape(p)))
@@ -111,48 +113,142 @@ const expand = async ($: $, pattern: string, base: string, home: string): Promis
   return out.length > 0 ? out : null
 }
 
-/** Lists everything the found parts of a command would delete. */
+/** Folders where overwriting a file is never asked about: scratch space and devices. */
+const scratch = async ($: $) => {
+  const tmp = ((await $.env.get('TMPDIR')) ?? '').replace(/\/+$/, '')
+  return ['/tmp', '/private/tmp', '/dev', ...(tmp === '' ? [] : [tmp, `/private${tmp}`])]
+}
+
+/** Parts that are asked about even when nothing they name exists right now. */
+export const isAlwaysAsked = (f: Found) => (f.kind === 'overwrite' ? false : f.kind === 'git-discard' ? f.note !== undefined : true)
+
+const baseName = (s: string) => s.slice(s.lastIndexOf('/') + 1)
+
+/** Lists everything the found parts of a command would delete, cut, overwrite or throw away. */
 export const resolve = async ($: $, found: Found[], cwd: string, home: string) => {
   const entries: Entry[] = []
   const notes: string[] = []
   const seen = new Set<string>()
+  const skip = await scratch($)
+  const isScratch = (abs: string) => skip.some(d => abs === d || abs.startsWith(`${d}/`))
   let skipped = 0
-  const add = async (abs: string, isDeep: boolean, change?: string) => {
+  const add = async (abs: string, isDeep: boolean, extra: Pick<Entry, 'action' | 'change'> = {}) => {
     if (seen.has(abs)) return
     seen.add(abs)
     if (entries.length >= MAX_ENTRIES) skipped++
-    else entries.push({ ...(await describe($, abs, cwd, home, isDeep)), ...(change === undefined ? {} : { change }) })
+    else entries.push({ ...(await describe($, abs, cwd, home, isDeep)), ...extra })
   }
-  const dirOf = (f: { cwd: string[]; isCwdKnown: boolean }) =>
-    f.isCwdKnown ? f.cwd.reduce((d, seg) => joinPath(d, seg === '~' || seg.startsWith('~/') ? home + seg.slice(1) : seg), cwd) : null
+  /** The folder a part runs in; `null` with the reason when that can't be known beforehand. */
+  const dirOf = async (f: { cwd: string[]; isCwdKnown: boolean }): Promise<{ dir: string | null; why: string }> => {
+    if (!f.isCwdKnown) return { dir: null, why: 'folder unknown: the command changes folder first' }
+    const dir = f.cwd.reduce((d, seg) => joinPath(d, seg === '~' || seg.startsWith('~/') ? home + seg.slice(1) : seg), cwd)
+    if (f.cwd.length > 0 && !(await $.fs.exists(dir).catch(() => false)))
+      return { dir: null, why: `folder unknown: ${tilde(dir, home)} does not exist now` }
+    return { dir, why: '' }
+  }
+  const isRelative = (w: { text: string; pattern: string }) => !w.text.startsWith('/') && !w.pattern.startsWith('~')
+  // a git dry run only in the session's own repository: another one's config (a planted filter) would run before anyone answered
+  const tops = new Map<string, Promise<string | null>>()
+  const topOf = (dir: string, argv: string[]) => {
+    if (!tops.has(dir))
+      tops.set(
+        dir,
+        $.process.run(argv, { cwd: dir, timeoutMs: 15_000 }).then(
+          r => (r.exitCode === 0 ? r.stdout.trim() : null),
+          () => null,
+        ),
+      )
+    return tops.get(dir)!
+  }
+  const isOwnRepo = async (dir: string, argv: string[]) => {
+    const [top, own] = await Promise.all([topOf(dir, argv), topOf(cwd, argv)])
+    return top !== null && top === own
+  }
 
   for (const f of found) {
     if (f.kind === 'opaque') {
       notes.push(`${f.text}: ${f.why}, so it can't be listed beforehand`)
       continue
     }
-    const dir = dirOf(f)
+    const { dir, why } = await dirOf(f)
     if (f.kind === 'paths') {
-      const change = f.change === undefined ? {} : { change: f.change }
+      const extra: Pick<Entry, 'action' | 'change'> = f.change === undefined ? {} : { action: 'truncate', change: f.change }
       for (const word of f.words) {
-        const isRelative = !word.text.startsWith('/') && !word.pattern.startsWith('~')
-        if (word.isDynamic || (dir === null && isRelative)) {
-          entries.push({
-            ...blank(word.text),
-            ...change,
-            kind: 'unknown',
-            note: word.isDynamic ? 'decided only when the command runs' : 'folder unknown: the command changes folder first',
-          })
+        if (word.isDynamic || (dir === null && isRelative(word))) {
+          entries.push({ ...blank(word.text), ...extra, kind: 'unknown', note: word.isDynamic ? 'decided only when the command runs' : why })
           continue
         }
         const paths = await expand($, word.pattern, dir ?? cwd, home)
-        if (paths === null) entries.push({ ...blank(word.text), ...change, note: 'matches nothing' })
-        else for (const p of paths) await add(p, f.change === undefined, f.change)
+        if (paths === 'too-many') entries.push({ ...blank(word.text), ...extra, kind: 'unknown', note: 'too many names to list' })
+        else if (paths === null) entries.push({ ...blank(word.text), ...extra, note: 'matches nothing' })
+        else for (const p of paths) await add(p, f.change === undefined, extra)
+      }
+      continue
+    }
+    if (f.kind === 'overwrite') {
+      // only what exists now is at stake; a name known only when it runs is not asked about
+      if (f.dest.isDynamic || (dir === null && isRelative(f.dest))) continue
+      const dests = await expand($, f.dest.pattern, dir ?? cwd, home)
+      const change = { action: 'overwrite' as const, change: `overwritten by ${f.tool === '>' ? 'a > redirect' : f.tool}` }
+      for (const dest of Array.isArray(dests) ? dests : []) {
+        if (isScratch(dest)) continue
+        const stat = await $.fs.stat(dest).catch(() => undefined)
+        if (stat === undefined) continue
+        const isInto = f.intoDir ?? stat.kind === 'dir'
+        if (!isInto) {
+          if (stat.kind === 'file' && !(f.isOnlyNonEmpty && stat.size === 0)) await add(dest, false, change)
+          continue
+        }
+        if (stat.kind !== 'dir') continue
+        for (const source of f.sources) {
+          if (source.isDynamic || (dir === null && isRelative(source))) continue
+          const names = await expand($, source.pattern, dir ?? cwd, home)
+          for (const name of Array.isArray(names) ? names : []) {
+            // `cp -r src/ dest` copies what is inside src on macOS, src itself on Linux: check both
+            const inside = /\/\.?$/.test(source.text) ? (await $.fs.list(name).catch(() => [])).map(e => joinPath(dest, e.name)) : []
+            for (const target of [joinPath(dest, baseName(name)), ...inside]) {
+              if (isScratch(target) || !(await $.fs.exists(target).catch(() => false))) continue
+              await add(target, false, change)
+            }
+          }
+        }
+      }
+      continue
+    }
+    if (f.kind === 'git-discard') {
+      if (f.note !== undefined) notes.push(`${f.text}: ${f.note}`)
+      if (f.argv === null || dir === null) {
+        notes.push(`${f.text}: its changed files can't be listed beforehand`)
+        continue
+      }
+      if (!(await isOwnRepo(dir, f.rootArgv))) {
+        notes.push(`${f.text}: works outside this session's repository, so its changed files are not listed beforehand`)
+        continue
+      }
+      const top = (await topOf(dir, f.rootArgv))!
+      const ran = await $.process.run(f.argv, { cwd: dir, timeoutMs: 15_000 }).catch(() => undefined)
+      if (ran === undefined || ran.exitCode !== 0) {
+        notes.push(`${f.text}: listing its changed files beforehand failed`)
+        continue
+      }
+      const fields = ran.stdout.split('\0')
+      for (let k = 0; k < fields.length; k++) {
+        const field = fields[k]!
+        if (field.length < 4) continue
+        const [x, y] = [field[0]!, field[1]!]
+        if (x === 'R' || x === 'C') k++
+        // a deleted file comes back: nothing is lost there
+        if (f.scope === 'worktree' ? y === ' ' || y === 'D' : /^[ D]{2}$/.test(x + y)) continue
+        await add(joinPath(top, field.slice(3)), false, { action: 'discard', change: 'uncommitted changes discarded' })
       }
       continue
     }
     if (f.argv === null || dir === null) {
       notes.push(`${f.text}: can't be listed beforehand`)
+      continue
+    }
+    if (f.kind === 'git-clean' && !(await isOwnRepo(dir, f.rootArgv))) {
+      notes.push(`${f.text}: works outside this session's repository, so it is not listed beforehand`)
       continue
     }
     const ran = await $.process.run(f.argv, { cwd: dir, timeoutMs: 15_000 }).catch(() => undefined)
@@ -178,7 +274,7 @@ const plural = (n: number, word: string, isMore = false) =>
   `${n}${isMore ? '+' : ''} ${word}${n === 1 && !isMore ? '' : 's'}`
 
 /** One line for the dialog and the toast: `2 folders (130 files) and 1 file`. */
-export const summary = (entries: Entry[]) => {
+export const summary = (entries: Entry[], notes: string[] = []) => {
   const dirs = entries.filter(e => e.kind === 'dir')
   const files = entries.filter(e => e.kind === 'file' || e.kind === 'link')
   const unknown = entries.filter(e => e.kind === 'unknown')
@@ -189,12 +285,18 @@ export const summary = (entries: Entry[]) => {
     files.length > 0 && plural(files.length, 'file'),
     unknown.length > 0 && `${plural(unknown.length, 'path')} known only when it runs`,
   ].filter((p): p is string => p !== false)
-  return parts.length > 0 ? parts.join(', ') : 'nothing that exists right now'
+  if (parts.length > 0) return parts.join(', ')
+  return notes.length > 0 ? "files that can't be listed beforehand" : 'nothing that exists right now'
 }
 
-/** What Claude wants to do: `truncate` when every path is only cut, `delete` otherwise. */
-export const headline = (entries: Entry[]) =>
-  `${entries.length > 0 && entries.every(e => e.change !== undefined) ? 'truncate' : 'delete'} ${summary(entries)}`
+const VERBS = { delete: 'delete', truncate: 'truncate', overwrite: 'overwrite', discard: 'discard changes to' } as const
+
+/** What Claude wants to do, as the dialog says it: `truncate 1 file`, `delete 2 folders`. */
+export const headline = (entries: Entry[], notes: string[] = []) => {
+  const actions = new Set(entries.map(e => e.action ?? 'delete'))
+  const verb = actions.size > 1 ? 'delete or change' : VERBS[[...actions][0] ?? 'delete']
+  return `${verb} ${summary(entries, notes)}`
+}
 
 type Line = { text: string; color?: string; isDim?: boolean; isBold?: boolean }
 
@@ -271,15 +373,25 @@ const hold = async ($: $, decided: Promise<Answer>, signal: AbortSignal): Promis
   }
 }
 
+/** The question in the engine's dialog: what, the command itself, and what can't be listed. */
+export const question = (req: Request) => {
+  const command = req.command.length > 200 ? `${req.command.slice(0, 200)}…` : req.command
+  const also = req.notes
+    .slice(0, 3)
+    .map(n => ` Note: ${n}.`)
+    .join('')
+  return `Claude wants to ${headline(req.entries, req.notes)} with \`${command}\`.${also} Allow it?`
+}
+
 /** The engine's own question, for when the panel can't be shown or held open. */
 const askInstead = async ($: $, req: Request, decided: Promise<Answer>): Promise<Answer> => {
   const asked = $.ui
-    .ask(`Claude wants to ${headline(req.entries)}. Allow it?`, {
-      options: ['Cancel', 'Allow delete'],
+    .ask(question(req), {
+      options: ['Cancel', 'Allow'],
       header: 'Delete',
     })
     .then(
-      (a): Answer => (a === 'Allow delete' ? 'allow' : 'cancel'),
+      (a): Answer => (a === 'Allow' ? 'allow' : 'cancel'),
       (): Answer => 'cancel',
     )
   return Promise.race([decided, asked])
@@ -319,13 +431,17 @@ export const register: Register = on => {
     const { found, isOnlyDeletes } = findDeletes(e.command)
     if (found.length === 0) return next(e)
 
-    // Nobody to ask (a `claude -p` run): refuse rather than delete unseen.
-    if ((await $.session.surfaces()).length === 0)
-      return { deny: 'delete-guard: deleting files needs a person to confirm it, and nobody can be asked in this session.' }
-
     const cwd = await $.session.cwd()
     const home = (await $.env.get('HOME')) ?? ''
     const { entries, notes } = await resolve($, found, cwd, home)
+    // only overwrites of files that don't exist (or are empty): nothing to lose
+    if (!found.some(isAlwaysAsked) && entries.length === 0 && notes.length === 0) return next(e)
+
+    // Nobody to ask (a `claude -p` run): refuse rather than delete unseen.
+    if ((await $.session.surfaces()).length === 0)
+      return {
+        deny: 'delete-guard: deleting or overwriting files needs a person to confirm it, and nobody can be asked in this session.',
+      }
     const req: Request = { id: e.tool_use_id, command: e.command, cwd, entries, notes }
 
     const decided = new Promise<Answer>(done => waiting.set(req.id, done))
@@ -334,7 +450,7 @@ export const register: Register = on => {
     const opened = await $.ui
       .open({ id: PANE, title: TITLE, focus: true })
       .catch(() => ({ isPlaced: false as const, reason: 'the panel could not be opened' }))
-    if (opened.isPlaced) $.ui.toast(`Claude wants to ${headline(entries)}: confirm or cancel in the "${TITLE}" panel`)
+    if (opened.isPlaced) $.ui.toast(`Claude wants to ${headline(entries, notes)}: confirm or cancel in the "${TITLE}" panel`)
 
     let answer: Answer
     try {
@@ -349,7 +465,7 @@ export const register: Register = on => {
     if (answer === 'cancel')
       return {
         deny:
-          'delete-guard: the user cancelled this delete, nothing was deleted. Do not retry it or delete these files another way unless the user asks for it.',
+          'delete-guard: the user cancelled this command, nothing was deleted or overwritten. Do not retry it or change these files another way unless the user asks for it.',
       }
     if (isOnlyDeletes) approved.add(req.id)
     try {
@@ -390,7 +506,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text bold color="error">
-          Claude wants to {headline(req.entries)}
+          Claude wants to {headline(req.entries, req.notes)}
         </Text>
         {list.length > 1 && <Text color="warning">1 of {list.length} waiting</Text>}
         <Text dimColor wrap="truncate-middle">
@@ -410,7 +526,7 @@ export const register: Register = on => {
           </Button>
           <Text> </Text>
           <Button key="allow" variant="primary" onPress={() => decide($, req.id, 'allow')}>
-            Allow delete
+            Allow
           </Button>
         </Box>
       </Box>

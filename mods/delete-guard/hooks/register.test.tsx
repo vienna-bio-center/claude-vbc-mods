@@ -2,7 +2,7 @@ import type { FsEntry, On, RenderSurface } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Request } from '../types'
-import { fit, headline, lines, summary } from './register'
+import { fit, headline, lines, question, summary } from './register'
 
 const PANE = {
   component: 'Pane',
@@ -52,6 +52,13 @@ const host = (on: On, surfaces: RenderSurface[] = ['terminal']) => {
   on('process.spawn', async function* () {
     await new Promise(() => undefined)
   })
+  // git in /p: notes.txt has uncommitted changes, gone.txt was deleted
+  on('process.run', (_$, e) => {
+    const argv = e.argv.join(' ')
+    if (argv.includes('rev-parse --show-toplevel')) return { value: { exitCode: 0, stdout: '/p\n', stderr: '', isStdoutTruncated: false } as never }
+    if (argv.includes(' status ')) return { value: { exitCode: 0, stdout: ' M notes.txt\0 D gone.txt\0', stderr: '', isStdoutTruncated: false } as never }
+    return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false } as never }
+  })
   on('tool.call', (_$, e) => {
     if (e.tool === 'Bash') ran.push(e.command)
     return { result: { stdout: '', stderr: '', interrupted: false } as never }
@@ -88,10 +95,18 @@ describe('panel text', () => {
   })
 
   test('a truncated file says what happens to it, and the headline says truncate', async () => {
-    const cut = { ...REQ.entries[1]!, change: 'emptied, the file stays' }
+    const cut = { ...REQ.entries[1]!, action: 'truncate' as const, change: 'emptied, the file stays' }
     expect(lines({ ...REQ, entries: [cut] }).map(l => l.text)).toContain('  • notes.txt  2 KB  → emptied, the file stays')
     expect(headline([cut])).toBe('truncate 1 file')
-    expect(headline([cut, REQ.entries[0]!])).toBe('delete 1 folder (2 files inside), 1 file')
+    expect(headline([cut, REQ.entries[0]!])).toBe('delete or change 1 folder (2 files inside), 1 file')
+  })
+
+  test('with nothing listable the text says so, and the question carries the command and notes', async () => {
+    const req: Request = { id: 't2', command: 'find . -name x | xargs rm', cwd: '/p', entries: [], notes: ['xargs rm: deletes whatever the command before it lists'] }
+    expect(headline(req.entries, req.notes)).toBe("delete files that can't be listed beforehand")
+    expect(question(req)).toBe(
+      "Claude wants to delete files that can't be listed beforehand with `find . -name x | xargs rm`. Note: xargs rm: deletes whatever the command before it lists. Allow it?",
+    )
   })
 
   test('fit keeps to the room and says how much it left out', async () => {
@@ -142,6 +157,45 @@ describe('asking before a delete', () => {
     await pane.press({ key: 'allow' })
     expect((await call).deny).toBeUndefined()
     expect(ran).toEqual(['truncate -s 0 notes.txt'])
+    await pane.unmount()
+  })
+
+  test('overwriting a file that is not there runs without a question', async ($, on) => {
+    const { ran } = host(on)
+    await $.tool.call({ tool: 'Bash', command: 'cp a.txt new.txt && echo hi > /p/fresh.log && echo x > /tmp/scratch.txt' })
+    expect(ran).toEqual(['cp a.txt new.txt && echo hi > /p/fresh.log && echo x > /tmp/scratch.txt'])
+  })
+
+  for (const [command, change] of [
+    ['cp other.txt notes.txt', 'overwritten by cp'],
+    ['cp ../q/notes.txt /p', 'overwritten by cp'],
+    ['echo hi > notes.txt', 'overwritten by a > redirect'],
+  ] as const) {
+    test(`overwriting an existing file asks first: ${command}`, async ($, on) => {
+      const { ran, clock } = host(on)
+      const call = $.tool.call({ tool: 'Bash', command })
+      await clock.settle()
+      expect(ran).toEqual([])
+      const pane = await $.ui.mount({ plugin: 'delete-guard', surface: 'terminal', ...PANE })
+      expect(await pane.find({ type: 'Text', text: /Claude wants to overwrite 1 file/ })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: new RegExp(`notes\\.txt\\s+2 KB\\s+→ ${change}`) })).toBeDefined()
+      await pane.press({ key: 'allow' })
+      expect((await call).deny).toBeUndefined()
+      expect(ran).toEqual([command])
+      await pane.unmount()
+    })
+  }
+
+  test('git restore lists the changed files it would throw away, not the deleted ones', async ($, on) => {
+    const { ran, clock } = host(on)
+    const call = $.tool.call({ tool: 'Bash', command: 'git restore .' })
+    await clock.settle()
+    const pane = await $.ui.mount({ plugin: 'delete-guard', surface: 'terminal', ...PANE })
+    expect(await pane.find({ type: 'Text', text: /Claude wants to discard changes to 1 file/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /notes\.txt\s+2 KB\s+→ uncommitted changes discarded/ })).toBeDefined()
+    await pane.press({ key: 'cancel' })
+    expect((await call).deny).toMatch(/cancelled/)
+    expect(ran).toEqual([])
     await pane.unmount()
   })
 
