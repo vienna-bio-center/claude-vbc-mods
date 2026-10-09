@@ -1,5 +1,8 @@
 # delete-guard
 
+> [!IMPORTANT]
+> **delete-guard does not stop scripts that delete files.** It only recognises delete commands that Claude types directly into its shell (`rm`, `git clean`, `find -delete`, …). If Claude writes a script (Python, shell, Node, …) that deletes files, or runs an existing one, the panel does not open and the files are deleted without asking. Treat the mod as a safety net for everyday commands, not as protection against data loss.
+
 A Claude Code mod that stops Claude before it deletes files. A side panel lists every folder and file the command would remove, with **Cancel** and **Allow delete** buttons underneath. Nothing is deleted until you press one of them.
 
 ```
@@ -58,13 +61,13 @@ It also looks inside `cmd1 && cmd2`, `;`, pipes, `sudo …`, `bash -c "…"`, `$
 ## Good to know
 
 - **Only Claude's shell (Bash tool) is watched.** Deletes through other tools (for example an MCP connector's own delete) are not caught.
-- **Best effort, not a sandbox.** The mod reads the command the way bash would and errs on the side of asking. A deliberately disguised command (e.g. a script file that deletes things) is not recognised.
+- **Best effort, not a sandbox.** The mod reads the command the way bash would and errs on the side of asking. Deletes inside scripts are not recognised (see the note at the top), nor are deliberately disguised commands.
 - **Not a backup.** After you press Allow, the files are gone as usual.
 - **Narrow terminal:** Claude Code shows a panel it opens on its own only from about 144 columns (110 once you have opened it before). Below that, the mod asks in Claude Code's normal question dialog instead, with a one-line summary.
 - **Claude Code's own permission question:** if the command does nothing but delete, your Allow is enough. If it also does something else (`rm -r build && npm install`), Claude Code still asks its usual question afterwards. Deny rules in your settings always win.
 - **`claude -p` and other runs where nobody can answer:** deletes are refused.
 - **Waiting** uses a sleeping `sleep` process (PowerShell `Start-Sleep` on Windows) that ends as soon as you answer. This is how a mod can wait longer than Claude Code's 10-second limit for mods.
-- Tested on Linux in the terminal. Windows is not tested.
+- Tested on Linux and macOS in the terminal. Windows is not tested.
 
 ## Development
 
