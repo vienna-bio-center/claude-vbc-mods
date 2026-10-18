@@ -1,6 +1,6 @@
 {
   "name": "context-meter",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Always-on context window meter above the prompt, with usage limits (terminal and desktop app)",
   "author": {
     "name": "Ronny Zimmermann"
