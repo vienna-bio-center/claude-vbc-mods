@@ -199,7 +199,7 @@ test('5h limit on the first row, the week on the second, no cost', async ($, on)
     const wide = await $.ui.mount({ plugin: 'context-meter', surface, ...BAND, props: { ...BAND.props, bodyColumns: 140 } })
     const rows = ((await wide.drawn()) as Node).children?.filter(Boolean) ?? []
     expect(rows.length).toBe(2)
-    expect(textOf(rows[0])).toMatch(/5h █{2}░{3} 42% ↻2h10$/)
+    expect(textOf(rows[0])).toMatch(/5h █{2}░{3} 42% ↻ 2h10$/)
     expect(textOf(rows[0])).not.toMatch(/7d/)
     expect(textOf(rows[1])).toMatch(/7d █{4}░ 86%$/)
     expect(textOf(rows[1])).toMatch(/Messages 36k/)

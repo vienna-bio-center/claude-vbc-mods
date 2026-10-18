@@ -239,7 +239,7 @@ export const register: Register = on => {
       mini: showMini ? bar(l.percent, 5) : null,
     }))
     const lenOf = (l: (typeof shown)[number]) =>
-      l.label.length + 1 + (l.mini ? 6 : 0) + l.pct.length + (l.reset ? l.reset.length + 2 : 0)
+      l.label.length + 1 + (l.mini ? 6 : 0) + l.pct.length + (l.reset ? l.reset.length + 3 : 0)
     // 5h on the first row, the week (and any other window) on the second
     const first = shown.filter(l => l.kind === 'five_hour')
     const second = shown.filter(l => l.kind !== 'five_hour')
@@ -289,7 +289,7 @@ export const register: Register = on => {
             <Text color={tone(l.percent)} bold>
               {l.pct}
             </Text>
-            {l.reset && <Text dimColor> ↻{l.reset}</Text>}
+            {l.reset && <Text dimColor> ↻ {l.reset}</Text>}
           </Box>
         ))}
       </Box>

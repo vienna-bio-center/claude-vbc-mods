@@ -3,8 +3,8 @@
 A Claude Code mod that keeps your context window and usage limits in view, right above the prompt — in the terminal and in the desktop app.
 
 ```
-Context ██▓▓▓▓▒▒░░░░░░░░░░░░ 20% · 40k / 200k          Details  5h ██░░░ 42% ↻2h10
-■ Messages 36k  ■ System tools 14k  ■ Skills 10k                        7d ████░ 86% ↻3d
+Context ██▓▓▓▓▒▒░░░░░░░░░░░░ 20% · 40k / 200k          Details  5h ██░░░ 42% ↻ 2h10
+■ Messages 36k  ■ System tools 14k  ■ Skills 10k                        7d ████░ 86% ↻ 3d
 ```
 
 - **Row 1:** context fill as a bar colored by category, percentage, tokens used / window size, and your 5-hour limit with the time until it resets.
