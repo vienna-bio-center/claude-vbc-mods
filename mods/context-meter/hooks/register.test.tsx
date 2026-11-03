@@ -123,6 +123,14 @@ const PANE_PROPS = {
   },
 } as const
 
+type TreeNode = { type: string; props?: Record<string, unknown>; children?: unknown[] }
+const textNodes = (n: unknown): TreeNode[] => {
+  if (!n || typeof n !== 'object') return []
+  const t = n as TreeNode
+  const kids = (t.children ?? []).flatMap(textNodes)
+  return t.type === 'Text' ? [t, ...kids] : kids
+}
+
 test('band and pane show the breakdown on terminal and desktop', async ($, on) => {
   on('session.usage', () => ({
     value: {
@@ -140,6 +148,10 @@ test('band and pane show the breakdown on terminal and desktop', async ($, on) =
     expect(await band.find({ type: 'Text', text: /20%/ })).toBeDefined()
     expect(await band.find({ type: 'Text', text: /Messages 36k/ })).toBeDefined()
     expect(await band.find({ key: 'details' })).toBeDefined()
+    // block glyphs must use the monospace face: the desktop counts bodyColumns in it
+    const glyphs = textNodes(await band.drawn()).filter(n => /[█░]/.test(textOf(n)))
+    expect(glyphs.length).toBeGreaterThan(0)
+    for (const n of glyphs) expect(n.props?.mono).toBe(true)
     await band.unmount()
 
     const pane = await $.ui.mount({ plugin: 'context-meter', surface, ...PANE_PROPS })
@@ -207,7 +219,20 @@ test('5h limit on the first row, the week on the second, no cost', async ($, on)
     expect(await wide.find({ key: 'details' })).toBeDefined()
     await wide.unmount()
 
-    const narrow = await $.ui.mount({ plugin: 'context-meter', surface, ...BAND, props: { ...BAND.props, bodyColumns: 80 } })
+    // a narrow column (the desktop's is capped) still fits mini bars and resets
+    const mid = await $.ui.mount({ plugin: 'context-meter', surface, ...BAND, props: { ...BAND.props, bodyColumns: 80 } })
+    const mrows = ((await mid.drawn()) as Node).children?.filter(Boolean) ?? []
+    expect(textOf(mrows[0])).toMatch(/5h █{2}░{3} 42% ↻ 2h10$/)
+    expect(textOf(mrows[1])).toMatch(/7d █{4}░ 86%$/)
+    await mid.unmount()
+
+    const tight = await $.ui.mount({ plugin: 'context-meter', surface, ...BAND, props: { ...BAND.props, bodyColumns: 70 } })
+    const trows = ((await tight.drawn()) as Node).children?.filter(Boolean) ?? []
+    expect(textOf(trows[0])).toMatch(/5h 42% ↻ 2h10$/)
+    expect(textOf(trows[1])).toMatch(/7d 86%$/)
+    await tight.unmount()
+
+    const narrow = await $.ui.mount({ plugin: 'context-meter', surface, ...BAND, props: { ...BAND.props, bodyColumns: 60 } })
     const nrows = ((await narrow.drawn()) as Node).children?.filter(Boolean) ?? []
     expect(textOf(nrows[0])).toMatch(/5h 42%$/)
     expect(textOf(nrows[1])).toMatch(/7d 86%$/)
