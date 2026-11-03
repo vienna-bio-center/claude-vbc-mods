@@ -10,6 +10,8 @@ import type {
 import type { Details, Fill, Heavy, Item, Limit, Part } from '../types'
 
 const PANE = 'context-meter'
+/** Bar cells kept before the limits lose their mini bars, then their reset times. */
+const MIN_BAR = 16
 const fill = atom({ plugin: 'context-meter', key: 'fill' } as const, null)
 const details = atom({ plugin: 'context-meter', key: 'details' } as const, null)
 const heavy = atom({ plugin: 'context-meter', key: 'heavy' } as const, [])
@@ -213,8 +215,13 @@ export const register: Register = on => {
     if (d === null && (current === null || current.percent === null || current.tokens === null)) {
       return (
         <Box>
+          <Text dimColor>Context </Text>
+          <Text dimColor mono>
+            ░░░░░░░░░░
+          </Text>
           <Text dimColor>
-            Context ░░░░░░░░░░ no reading yet
+            {' '}
+            no reading yet
             {current ? ` · window ${kilo(current.window)}` : ''}
           </Text>
         </Box>
@@ -229,33 +236,37 @@ export const register: Register = on => {
 
     const lim = await read($, limits)
     const nowMs = (await read($, now)) || Date.now()
-    const showMini = cols >= 110
-    const showReset = cols >= 90
-    const shown = lim.map(l => ({
-      ...l,
-      label: limitLabel(l.kind),
-      pct: `${Math.round(l.percent)}%`,
-      reset: showReset ? until(l.resetsAt, nowMs) : '',
-      mini: showMini ? bar(l.percent, 5) : null,
-    }))
-    const lenOf = (l: (typeof shown)[number]) =>
-      l.label.length + 1 + (l.mini ? 6 : 0) + l.pct.length + (l.reset ? l.reset.length + 3 : 0)
-    // 5h on the first row, the week (and any other window) on the second
-    const first = shown.filter(l => l.kind === 'five_hour')
-    const second = shown.filter(l => l.kind !== 'five_hour')
-    const limitW = shown.length ? Math.max(...[first, second].map(g => g.reduce((n, l) => n + lenOf(l), 0) + Math.max(0, g.length - 1) * 3)) : 0
-    const width = Math.max(8, Math.min(40, cols - 30 - limitW - 10))
+    const layout = (showMini: boolean, showReset: boolean) => {
+      const shown = lim.map(l => ({
+        ...l,
+        label: limitLabel(l.kind),
+        pct: `${Math.round(l.percent)}%`,
+        reset: showReset ? until(l.resetsAt, nowMs) : '',
+        mini: showMini ? bar(l.percent, 5) : null,
+      }))
+      const lenOf = (l: (typeof shown)[number]) =>
+        l.label.length + 1 + (l.mini ? 6 : 0) + l.pct.length + (l.reset ? l.reset.length + 3 : 0)
+      // 5h on the first row, the week (and any other window) on the second
+      const first = shown.filter(l => l.kind === 'five_hour')
+      const second = shown.filter(l => l.kind !== 'five_hour')
+      const limitW = shown.length ? Math.max(...[first, second].map(g => g.reduce((n, l) => n + lenOf(l), 0) + Math.max(0, g.length - 1) * 3)) : 0
+      return { first, second, limitW, room: cols - 30 - limitW - 10 }
+    }
+    // the richest limits that still leave the bar MIN_BAR cells: mini bars go first, then resets
+    const fit = [layout(true, true), layout(false, true)].find(l => l.room >= MIN_BAR) ?? layout(false, false)
+    const { first, second, limitW } = fit
+    const width = Math.max(8, Math.min(40, fit.room))
 
     const barRow = d
       ? (() => {
           const sg = segments(d.parts, d.max, width)
           return [
             ...sg.used.map((seg, i) => (
-              <Text key={`s${i}`} color={seg.color}>
+              <Text key={`s${i}`} color={seg.color} mono>
                 {'█'.repeat(seg.cells)}
               </Text>
             )),
-            <Text key="rest" dimColor>
+            <Text key="rest" dimColor mono>
               {'░'.repeat(sg.rest)}
             </Text>,
           ]
@@ -263,8 +274,8 @@ export const register: Register = on => {
       : (() => {
           const b = bar(percent, width)
           return [
-            <Text key="f" color={color}>{b.filled}</Text>,
-            <Text key="e" dimColor>{b.empty}</Text>,
+            <Text key="f" color={color} mono>{b.filled}</Text>,
+            <Text key="e" dimColor mono>{b.empty}</Text>,
           ]
         })()
 
@@ -278,15 +289,16 @@ export const register: Register = on => {
       taken += len
     }
 
-    const limitBox = (key: string, group: typeof shown) => (
+    const limitBox = (key: string, group: typeof first) => (
       <Box key={key} width={limitW}>
         {group.map((l, i) => (
           <Box key={`l-${l.kind}`}>
             {i > 0 && <Text dimColor> │ </Text>}
             <Text dimColor>{l.label} </Text>
-            {l.mini && <Text color={tone(l.percent)}>{l.mini.filled}</Text>}
-            {l.mini && <Text dimColor>{l.mini.empty} </Text>}
-            <Text color={tone(l.percent)} bold>
+            {l.mini && <Text color={tone(l.percent)} mono>{l.mini.filled}</Text>}
+            {l.mini && <Text dimColor mono>{l.mini.empty}</Text>}
+            {l.mini && <Text dimColor> </Text>}
+            <Text color={tone(l.percent)} bold tabular>
               {l.pct}
             </Text>
             {l.reset && <Text dimColor> ↻ {l.reset}</Text>}
@@ -300,8 +312,10 @@ export const register: Register = on => {
         <Box justifyContent="space-between">
           <Box>
             <Text dimColor>Context </Text>
-            {barRow}
-            <Text color={color} bold>
+            <Box flexShrink={0} flexWrap="nowrap">
+              {barRow}
+            </Box>
+            <Text color={color} bold tabular>
               {' '}
               {percent}%
             </Text>

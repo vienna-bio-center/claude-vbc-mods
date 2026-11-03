@@ -46,7 +46,7 @@ The details pane lists:
 - **Updates:** after every model response (also mid-turn), at the end of each turn, and every minute for the reset countdowns. No polling, no extra API calls.
 - **Estimates:** category figures are the same local estimate `/context` uses in summary mode. Tool result sizes are approximate (characters ÷ 4). Run `/context` for an exact count.
 - **Usage limits** appear only on a Claude subscription and only after the session's first response — before that there is no reading.
-- **Narrow windows:** below 110 columns the small limit bars are dropped, below 90 the reset times too.
+- **Narrow windows:** the limits keep their small bars and reset times as long as the context bar still gets 16 cells; below that the small bars go first, then the reset times.
 - **Subagents** are not counted: their responses and tool results don't land in your main context.
 
 ## Development
