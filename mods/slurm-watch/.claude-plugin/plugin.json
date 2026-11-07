@@ -1,7 +1,7 @@
 {
   "name": "slurm-watch",
-  "version": "0.1.0",
-  "description": "Keeps an eye on the Slurm jobs Claude submits: status line, a jobs panel, and a note when a job ends",
+  "version": "0.2.0",
+  "description": "Keeps an eye on the Slurm jobs Claude submits: status line, a jobs panel, and a note with what each job used when it ends",
   "author": {
     "name": "Ronny Zimmermann"
   },

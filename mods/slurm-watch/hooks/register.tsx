@@ -9,6 +9,10 @@ import {
   endSummary,
   endText,
   explainFailure,
+  FORMAT,
+  FORMAT_LEGACY,
+  hintsFor,
+  pct,
   findSubmissions,
   hostPatterns,
   isAllowed,
@@ -23,7 +27,9 @@ import {
   viaKey,
   viaLabel,
   viaOf,
+  withSteps,
 } from './slurm'
+import type { SacctOptions } from './slurm'
 
 const PANE = 'slurm-watch'
 const TITLE = 'Slurm jobs'
@@ -58,6 +64,8 @@ const nowAtom = atom({ plugin: 'slurm-watch', key: 'now' } as const, 0)
 let hosts: string[] = hostPatterns(DEFAULT_HOSTS)
 /** A first look already waits: further submits ride on it. */
 let firstLookPending = false
+/** Hosts whose sacct lacks StdOut and StdErr (older Slurm): asked with FORMAT_LEGACY. */
+const legacyHosts = new Set<string>()
 /** Everything that reads and writes the store runs one after another in this process. */
 let chain: Promise<unknown> = Promise.resolve()
 
@@ -84,6 +92,7 @@ const DEFAULTS = {
   misses: 0,
   notified: false,
   told: false,
+  usage: null,
 } satisfies Partial<Job>
 
 function asJob(v: unknown): Job | null {
@@ -172,16 +181,35 @@ function groups(jobs: readonly Job[]): Group[] {
 const pick = <T,>(m: Record<string, T>, keys: ReadonlySet<string>) =>
   Object.fromEntries(Object.entries(m).filter(([k]) => keys.has(k)))
 
-/** One sacct call per host (and cluster) in `todo`. */
+/** One sacct run; null when it could not start or did not finish. */
+async function sacct($: EngineInterface, g: Group, ids: readonly string[], user: string | undefined, opts: SacctOptions) {
+  const argv = sacctArgv(g.via, ids, g.cluster, user, opts)
+  if (argv === null) return null
+  return $.process.run(argv, { timeoutMs: SACCT_TIMEOUT_MS }).catch(() => null)
+}
+
+/**
+ * One sacct call per host (and cluster) in `todo`, allocations only: one line
+ * per job, however many steps it ran. For the jobs that ended, a second call
+ * with their steps, for what they used.
+ */
 async function pollAll($: EngineInterface, todo: Group[], poll: Poll, now: number) {
   const user = await $.env.get('USER')
   const outcome = new Map<string, string | null>()
   for (const g of todo) {
     const key = viaKey(g.via)
     const rest = poll.backoff[key]
-    const argv = sacctArgv(g.via, g.jobs.map(j => j.id), g.cluster, user)
-    if (argv === null) continue
-    const ran = await $.process.run(argv, { timeoutMs: SACCT_TIMEOUT_MS }).catch(() => null)
+    const ids = g.jobs.map(j => j.id)
+    if (sacctArgv(g.via, ids, g.cluster, user) === null) continue
+    let legacy = legacyHosts.has(key)
+    let ran = await sacct($, g, ids, user, { allocations: true, legacy })
+    if (ran !== null && ran.exitCode !== 0 && !legacy && /invalid field/i.test(ran.stderr)) {
+      // an older Slurm without StdOut and StdErr: asked without them from now on
+      legacy = true
+      legacyHosts.add(key)
+      ran = await sacct($, g, ids, user, { allocations: true, legacy })
+    }
+    const format = legacy ? FORMAT_LEGACY : FORMAT
     let error: string | null = null
     if (ran === null) {
       error =
@@ -190,9 +218,30 @@ async function pollAll($: EngineInterface, todo: Group[], poll: Poll, now: numbe
           : `ssh to ${g.via.host} did not finish in time.`
     } else if (ran.exitCode !== 0) {
       error = explainFailure(g.via, ran.exitCode, ran.stderr)
+    } else if (ran.isStdoutTruncated) {
+      // a cut answer would make the jobs past the cut look gone
+      error = `sacct on ${g.via.kind === 'ssh' ? g.via.host : 'this machine'} listed more than the mod reads (4 MB); trying again later.`
     } else {
-      const rows = parseSacct(ran.stdout)
-      for (const j of g.jobs) await patchJob($, jobKey(j), x => applyReading(x, rows.get(x.id), now))
+      const rows = parseSacct(ran.stdout, format)
+      const ended: string[] = []
+      for (const j of g.jobs) {
+        await patchJob($, jobKey(j), x => {
+          const y = applyReading(x, rows.get(x.id), now)
+          if (!isFinal(x.state) && isFinal(y.state) && y.state !== 'UNKNOWN') ended.push(y.id)
+          return y
+        })
+      }
+      if (ended.length > 0) {
+        // the steps of the jobs that just ended: MaxRSS, NTasks, a step killed for memory.
+        // If this fails, the allocations' figures stay.
+        const steps = await sacct($, g, ended, user, { legacy })
+        if (steps !== null && steps.exitCode === 0 && !steps.isStdoutTruncated) {
+          const stepRows = parseSacct(steps.stdout, format)
+          for (const j of g.jobs) {
+            if (ended.includes(j.id)) await patchJob($, jobKey(j), x => withSteps(x, stepRows.get(x.id)))
+          }
+        }
+      }
     }
     if (error !== null && rest && now - rest.since >= GIVE_UP_MS) {
       // two days without an answer: the jobs there are given up, not asked about for weeks
@@ -315,6 +364,7 @@ async function record($: EngineInterface, command: string, output: string): Prom
       misses: 0,
       notified: false,
       told: false,
+      usage: null,
     }
     const key = JOB_PREFIX + jobKey(job)
     if ((await $.store.get(key)) !== undefined) continue
@@ -352,7 +402,9 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  // no `{ tool: 'Bash' }` matcher: with many MCP tools installed, its type runs too deep for tsc (TS2589)
+  on('tool.call', async ($, e, next) => {
+    if (e.tool !== 'Bash') return next(e)
     const ran = await next(e)
     if (!ran.text) return ran
     // the display must never touch the tool's own result
@@ -371,7 +423,8 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'slurm-jobs' }, async $ => {
     await serial(() => show($))
-    await $.ui.open({ id: PANE, title: TITLE })
+    // the surface's own pane grey made the text hard to read: the terminal's background instead
+    await $.ui.open({ id: PANE, title: TITLE, backgroundColor: 'transparent' })
     return { text: 'Slurm jobs opened.' }
   })
 
@@ -394,7 +447,7 @@ export const register: Register = (on, options) => {
         ? `next in ${ago(poll.nextAt - now + 59_999)}`
         : 'next within a minute'
 
-    // columns that fit: id, name and state always; time, host, exit and age while there is room
+    // columns that fit: id, name and state always; time, host, exit, usage and age while there is room
     const idW = Math.min(16, Math.max(6, ...jobs.map(j => j.id.length + (j.cluster ? j.cluster.length + 1 : 0))) + 1)
     const stateW = 14
     let room = cols - idW - stateW - 2 - 12 // 2: the ✕; 12: the name's least
@@ -402,9 +455,17 @@ export const register: Register = (on, options) => {
     const showTime = fits(12)
     const showHost = fits(16)
     const showExit = fits(7)
+    const showUse = fits(14)
     const showAge = fits(7)
     const nameW = Math.max(8, 12 + room)
     const cut = (s: string, w: number) => (s.length > w ? `${s.slice(0, Math.max(1, w - 1))}…` : s)
+    /** A share of what a job asked for, for an ended job: `0.4 %`, `97 %`. */
+    const share = (j: Job, which: 'cpu' | 'mem') => {
+      const u = j.usage
+      if (!isFinal(j.state) || u === null) return ''
+      if (which === 'cpu') return u.cpuPct === null ? '–' : pct(u.cpuPct)
+      return u.memPeak === null || u.memAlloc === null || u.memAlloc === 0 ? '–' : pct((u.memPeak / u.memAlloc) * 100)
+    }
     const stateOf = (j: Job) =>
       !isFinal(j.state) && !isTracked(j) ? 'not checked' : j.state.toLowerCase().replace(/_/g, ' ')
 
@@ -448,6 +509,16 @@ export const register: Register = (on, options) => {
               <Text bold>Exit</Text>
             </Box>
           )}
+          {showUse && (
+            <Box width={7}>
+              <Text bold>CPU</Text>
+            </Box>
+          )}
+          {showUse && (
+            <Box width={7}>
+              <Text bold>Mem</Text>
+            </Box>
+          )}
           {showAge && (
             <Box width={7}>
               <Text bold>Sent</Text>
@@ -456,8 +527,11 @@ export const register: Register = (on, options) => {
         </Box>
         {sorted.map(j => {
           const key = jobKey(j)
+          const hints = hintsFor(j)
+          const logs = j.usage && isFinal(j.state) && j.state !== 'COMPLETED' ? j.usage.logErr ?? j.usage.logOut : null
           return (
-            <Box key={`row-${key}`}>
+            <Box key={`row-${key}`} flexDirection="column">
+            <Box>
               <Box width={idW}>
                 <Text wrap="truncate-end">{cut(j.cluster ? `${j.id}@${j.cluster}` : j.id, idW - 1)}</Text>
               </Box>
@@ -471,27 +545,50 @@ export const register: Register = (on, options) => {
               </Box>
               {showTime && (
                 <Box width={12}>
-                  <Text dimColor>{j.tasks ? `${j.tasks.done}/${j.tasks.total}` : j.elapsed || '–'}</Text>
+                  <Text>{j.tasks ? `${j.tasks.done}/${j.tasks.total}` : j.elapsed || '–'}</Text>
                 </Box>
               )}
               {showHost && (
                 <Box width={16}>
-                  <Text dimColor wrap="truncate-end">
+                  <Text wrap="truncate-end">
                     {cut(viaLabel(j.via), 15)}
                   </Text>
                 </Box>
               )}
               {showExit && (
                 <Box width={7}>
-                  <Text dimColor>{isFinal(j.state) ? j.exitCode || '–' : ''}</Text>
+                  <Text>{isFinal(j.state) ? j.exitCode || '–' : ''}</Text>
+                </Box>
+              )}
+              {showUse && (
+                <Box width={7}>
+                  <Text>{share(j, 'cpu')}</Text>
+                </Box>
+              )}
+              {showUse && (
+                <Box width={7}>
+                  <Text>{share(j, 'mem')}</Text>
                 </Box>
               )}
               {showAge && (
                 <Box width={7}>
-                  <Text dimColor>{ago(now - j.submittedAt)}</Text>
+                  <Text>{ago(now - j.submittedAt)}</Text>
                 </Box>
               )}
               <Button key={`forget-${key}`} label="✕" plain dimColor onPress={() => serial(() => forget($, key))} />
+            </Box>
+            {hints.map((hint, n) => (
+              <Box key={`hint-${key}-${n}`} paddingLeft={idW}>
+                <Text color="warning">↳ {hint}</Text>
+              </Box>
+            ))}
+            {logs !== null && (
+              <Box paddingLeft={idW}>
+                <Text wrap="truncate-start">
+                  Log: {logs}
+                </Text>
+              </Box>
+            )}
             </Box>
           )
         })}
