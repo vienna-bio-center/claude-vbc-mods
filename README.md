@@ -8,6 +8,7 @@ Claude Code mods for the VBC: displays and extensions for the terminal and the d
 |---|---|
 | [context-meter](mods/context-meter/) | Context window and usage limits, always visible above the prompt |
 | [delete-guard](mods/delete-guard/) | Stops Claude before it deletes files: a side panel lists what would go, with Cancel and Allow buttons |
+| [slurm-watch](mods/slurm-watch/) | Follows the Slurm jobs Claude submits: state in the status line, a jobs panel, and a note to you and Claude when a job ends |
 
 ## Install
 

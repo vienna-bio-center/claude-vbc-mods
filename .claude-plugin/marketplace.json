@@ -12,6 +12,10 @@
     {
       "name": "delete-guard",
       "source": "./mods/delete-guard"
+    },
+    {
+      "name": "slurm-watch",
+      "source": "./mods/slurm-watch"
     }
   ]
 }
