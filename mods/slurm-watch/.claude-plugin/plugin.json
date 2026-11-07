@@ -1,0 +1,18 @@
+{
+  "name": "slurm-watch",
+  "version": "0.2.0",
+  "description": "Keeps an eye on the Slurm jobs Claude submits: status line, a jobs panel, and a note with what each job used when it ends",
+  "author": {
+    "name": "Ronny Zimmermann"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "hosts": {
+      "type": "string",
+      "title": "Hosts",
+      "description": "The ssh hosts slurm-watch may ask about jobs: names and *.domain patterns, separated by commas. A job sent to any other host is listed but never checked. Jump hosts must be listed too.",
+      "default": "cbe.next, *.vbc.ac.at"
+    }
+  }
+}
